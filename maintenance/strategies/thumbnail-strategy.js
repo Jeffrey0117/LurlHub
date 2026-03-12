@@ -36,7 +36,7 @@ class ThumbnailStrategy extends MaintenanceStrategy {
   }
 
   async processRecord(record, context) {
-    const { checker, dataDir, generateVideoThumbnail, workr } = context;
+    const { checker, dataDir, generateVideoThumbnail, workr, fileStore } = context;
 
     try {
       // 取得影片來源
@@ -99,6 +99,15 @@ class ThumbnailStrategy extends MaintenanceStrategy {
       }
 
       if (success) {
+        // 註冊到 Pokkit 儲存索引
+        if (fileStore) {
+          try {
+            fileStore.adopt('thumbnails', thumbFilename, 'image/webp', {
+              id: `thumb:${record.id}`,
+              tags: [`record:${record.id}`, 'type:thumbnail'],
+            });
+          } catch (e) { /* skip if exists */ }
+        }
         return {
           success: true,
           updates: {

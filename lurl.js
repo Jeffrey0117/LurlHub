@@ -121,6 +121,20 @@ try {
 const lurlDb = require('./_lurl-db');
 lurlDb.init();
 
+// Pokkit 儲存引擎（檔案索引）
+const PokkitStore = require('../pokkit/core');
+const fileStore = new PokkitStore({
+  dataDir: path.join(__dirname, 'data'),
+  buckets: {
+    videos: { mode: 'flat' },
+    images: { mode: 'flat' },
+    thumbnails: { mode: 'flat' },
+    previews: { mode: 'flat' },
+    hls: { mode: 'flat' },
+  },
+  dbName: 'pokkit.db',
+});
+
 // ==================== 安全配置 ====================
 // 從環境變數讀取，請在 .env 檔案中設定
 const ADMIN_PASSWORD = process.env.LURL_ADMIN_PASSWORD || 'change-me';
@@ -173,6 +187,7 @@ function initMaintenanceScheduler() {
       generateVideoThumbnail,
       downloadFile,
       broadcastLog,
+      fileStore,
     },
     config: {
       autoRun: false, // 預設不自動執行
@@ -8861,6 +8876,13 @@ module.exports = {
               .toFile(thumbFullPath);
             thumbnailPath = `thumbnails/${thumbFilename}`;
             console.log(`[lurl] 縮圖已存 (WebP): ${thumbFilename}`);
+            // 註冊到 Pokkit
+            try {
+              fileStore.adopt('thumbnails', thumbFilename, 'image/webp', {
+                id: `thumb:${id}`,
+                tags: [`record:${id}`, 'type:thumbnail'],
+              });
+            } catch (e) { /* skip if already exists */ }
           } catch (thumbErr) {
             console.error(`[lurl] 縮圖保存失敗: ${thumbErr.message}`);
           }
@@ -8889,6 +8911,16 @@ module.exports = {
 
           // 下載成功後處理縮圖
           if (ok) {
+            // 註冊到 Pokkit 儲存索引
+            try {
+              const mime = type === 'video' ? 'video/mp4' : 'application/octet-stream';
+              fileStore.adopt(folder, filename, mime, {
+                id: `${folder}:${id}`,
+                tags: [`record:${id}`, `type:${type}`],
+                metadata: { recordId: id, title },
+              });
+            } catch (e) { console.warn(`[lurl] fileStore adopt skip: ${e.message}`); }
+
             if (type === 'video' && !thumbnailPath) {
               // 影片：用 ffmpeg 產生縮圖
               const thumbFilename = `${id}.webp`;
@@ -8896,6 +8928,13 @@ module.exports = {
               const thumbOk = await generateVideoThumbnail(videoFullPath, thumbFullPath);
               if (thumbOk) {
                 updateRecordThumbnail(id, `thumbnails/${thumbFilename}`);
+                // 註冊縮圖到 Pokkit
+                try {
+                  fileStore.adopt('thumbnails', thumbFilename, 'image/webp', {
+                    id: `thumb:${id}`,
+                    tags: [`record:${id}`, 'type:thumbnail'],
+                  });
+                } catch (e) { /* skip */ }
               }
             }
 
@@ -9241,6 +9280,17 @@ module.exports = {
 
             console.log(`[lurl] 分塊上傳完成: ${filename} (${(finalBuffer.length / 1024 / 1024).toFixed(2)} MB)`);
 
+            // 註冊到 Pokkit 儲存索引
+            try {
+              const bucket = record.type === 'video' ? 'videos' : 'images';
+              const mime = record.type === 'video' ? 'video/mp4' : 'application/octet-stream';
+              fileStore.adopt(bucket, filename, mime, {
+                id: `${bucket}:${id}`,
+                tags: [`record:${id}`, `type:${record.type}`],
+                metadata: { recordId: id, title: record.title },
+              });
+            } catch (e) { console.warn(`[lurl] fileStore adopt skip: ${e.message}`); }
+
             // 上傳完成後為圖片生成縮圖
             if (record.type === 'image' && !record.thumbnailPath) {
               processImage(destPath, id).then(thumbPath => {
@@ -9260,6 +9310,17 @@ module.exports = {
           // 單次上傳（小檔案）
           fs.writeFileSync(destPath, buffer);
           console.log(`[lurl] 前端上傳成功: ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB)`);
+
+          // 註冊到 Pokkit 儲存索引
+          try {
+            const bucket = record.type === 'video' ? 'videos' : 'images';
+            const mime = record.type === 'video' ? 'video/mp4' : 'application/octet-stream';
+            fileStore.adopt(bucket, filename, mime, {
+              id: `${bucket}:${id}`,
+              tags: [`record:${id}`, `type:${record.type}`],
+              metadata: { recordId: id, title: record.title },
+            });
+          } catch (e) { console.warn(`[lurl] fileStore adopt skip: ${e.message}`); }
 
           // 上傳完成後為圖片生成縮圖
           if (record.type === 'image' && !record.thumbnailPath) {
@@ -11057,7 +11118,11 @@ module.exports = {
         return;
       }
 
-      // 刪除檔案
+      // 刪除所有關聯檔案（主檔 + 縮圖 + 預覽 + HLS）
+      const removedCount = fileStore.removeByTag(`record:${id}`);
+      console.log(`[lurl] fileStore 刪除 ${removedCount} 個關聯檔案`);
+
+      // Fallback: 如果 fileStore 沒刪到主檔，直接刪
       const filePath = path.join(DATA_DIR, record.backupPath);
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
@@ -11162,23 +11227,19 @@ module.exports = {
         record.blocked = true;
         record.blockedAt = new Date().toISOString();
 
-        // 刪除主檔案
+        // 透過 Pokkit 統一刪除所有關聯檔案
+        const removedCount = fileStore.removeByTag(`record:${id}`);
+        deleted = removedCount > 0;
+
+        // Fallback: 確保主檔案也被刪除
         const filePath = path.join(DATA_DIR, record.backupPath);
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
           deleted = true;
         }
 
-        // 刪除縮圖
-        if (record.thumbnailPath) {
-          const thumbPath = path.join(DATA_DIR, record.thumbnailPath);
-          if (fs.existsSync(thumbPath)) {
-            fs.unlinkSync(thumbPath);
-          }
-        }
-
         record.fileExists = false;
-        console.log(`[lurl] 封鎖: ${record.title}`);
+        console.log(`[lurl] 封鎖: ${record.title} (刪除 ${removedCount} 個檔案)`);
       } else {
         // 解除封鎖：清除封鎖狀態
         record.blocked = false;
@@ -11536,6 +11597,17 @@ module.exports = {
 
       if (success) {
         console.log(`[lurl] 重試下載成功: ${record.title}`);
+        // 註冊到 Pokkit
+        try {
+          const bucket = record.type === 'video' ? 'videos' : 'images';
+          const filename = path.basename(record.backupPath);
+          const mime = record.type === 'video' ? 'video/mp4' : 'application/octet-stream';
+          fileStore.adopt(bucket, filename, mime, {
+            id: `${bucket}:${record.id}`,
+            tags: [`record:${record.id}`, `type:${record.type}`],
+            metadata: { recordId: record.id, title: record.title },
+          });
+        } catch (e) { /* skip if exists */ }
         res.writeHead(200, corsHeaders());
         res.end(JSON.stringify({ ok: true }));
       } else {

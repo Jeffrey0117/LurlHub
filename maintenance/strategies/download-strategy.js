@@ -36,7 +36,7 @@ class DownloadStrategy extends MaintenanceStrategy {
   }
 
   async processRecord(record, context) {
-    const { downloadFile, dataDir, workr, lurlRetry } = context;
+    const { downloadFile, dataDir, workr, lurlRetry, fileStore } = context;
 
     if (!record.fileUrl) {
       return { success: false, error: 'No file URL' };
@@ -133,6 +133,17 @@ class DownloadStrategy extends MaintenanceStrategy {
       }
 
       if (success) {
+        // 註冊到 Pokkit 儲存索引
+        if (fileStore) {
+          try {
+            const mime = record.type === 'video' ? 'video/mp4' : 'application/octet-stream';
+            fileStore.adopt(folder, filename, mime, {
+              id: `${folder}:${record.id}`,
+              tags: [`record:${record.id}`, `type:${record.type}`],
+              metadata: { recordId: record.id, title: record.title },
+            });
+          } catch (e) { /* skip if exists */ }
+        }
         return {
           success: true,
           updates: {

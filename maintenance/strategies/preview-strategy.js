@@ -50,7 +50,7 @@ class PreviewStrategy extends MaintenanceStrategy {
   }
 
   async processRecord(record, context) {
-    const { checker, dataDir, workr } = context;
+    const { checker, dataDir, workr, fileStore } = context;
 
     try {
       // 必須有原始 MP4/MOV
@@ -134,6 +134,16 @@ class PreviewStrategy extends MaintenanceStrategy {
       if (success) {
         const stats = fs.statSync(previewFullPath);
         console.log(`[Preview] ${record.id} 完成 (${Math.round(stats.size / 1024)}KB)`);
+
+        // 註冊到 Pokkit 儲存索引
+        if (fileStore) {
+          try {
+            fileStore.adopt('previews', previewFilename, 'video/mp4', {
+              id: `preview:${record.id}`,
+              tags: [`record:${record.id}`, 'type:preview'],
+            });
+          } catch (e) { /* skip if exists */ }
+        }
 
         return {
           success: true,

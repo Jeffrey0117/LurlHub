@@ -182,7 +182,7 @@ class HLSStrategy extends MaintenanceStrategy {
    * 注意：不刪除原始檔，由 CleanupStrategy 負責安全清理
    */
   async onHLSComplete(record, inputPath, outputDir, videoInfo, context) {
-    const { broadcastLog } = context;
+    const { broadcastLog, fileStore } = context;
 
     const updates = {
       hlsReady: true,
@@ -192,6 +192,16 @@ class HLSStrategy extends MaintenanceStrategy {
       duration: videoInfo.duration,
       lastProcessedAt: new Date().toISOString(),
     };
+
+    // 註冊 HLS 目錄到 Pokkit 儲存索引
+    if (fileStore) {
+      try {
+        fileStore.registerDirectory(`hls:${record.id}`, 'hls', record.id, {
+          tags: [`record:${record.id}`, 'type:hls'],
+          metadata: { recordId: record.id },
+        });
+      } catch (e) { /* skip if exists */ }
+    }
 
     console.log(`[HLS] ${record.id} 處理完成（原始檔保留，由清理策略處理）`);
     if (broadcastLog) {
